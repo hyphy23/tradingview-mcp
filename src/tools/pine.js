@@ -40,7 +40,7 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_new', 'Create a new blank Pine Script', {
+  server.tool('pine_new', 'Create a new blank, unsaved Pine Script via the editor\'s Create new menu (detaches from any open saved script). Fails rather than overwriting the open script; only call pine_set_source after this succeeds.', {
     type: z.enum(['indicator', 'strategy', 'library']).describe('Type of script to create'),
   }, async ({ type }) => {
     try { return jsonResult(await core.newScript({ type })); }

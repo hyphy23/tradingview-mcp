@@ -509,29 +509,73 @@ export async function newScript({ type }) {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
-  const typeMap = { indicator: 'indicator', strategy: 'strategy', library: 'library' };
-  const templates = {
-    indicator: '//@version=6\nindicator("My script")\nplot(close)',
-    strategy: '//@version=6\nstrategy("My strategy", overlay=true)\n',
-    library: '//@version=6\n// @description TODO: add library description here\nlibrary("MyLibrary")\n',
-  };
+  // Drive TradingView's own "script name ▾ → Create new → <type>" menu so the
+  // editor detaches from whatever saved script is open. Never fall back to
+  // overwriting the editor text: if a saved script is open, a later
+  // pine_set_source + compile would save into it (and destroy it).
+  const menuLabel = { indicator: /^Indicator/, strategy: /^Strategy/, library: /^Library/ }[type || 'indicator'];
+  if (!menuLabel) throw new Error(`Unknown script type "${type}". Use indicator, strategy, or library.`);
+  const declRe = { indicator: 'indicator\\(', strategy: 'strategy\\(', library: 'library\\(' }[type || 'indicator'];
 
-  const template = templates[type] || templates.indicator;
+  const readTitle = `(function() {
+    var b = Array.prototype.find.call(document.querySelectorAll('[class*="nameButton"]'), function(x) { return x.offsetParent; });
+    return b ? b.textContent.trim() : null;
+  })()`;
+  const before = await evaluate(readTitle);
 
-  // Simply set the source to a new template — this is the most reliable approach
-  const escaped = JSON.stringify(template);
-  const set = await evaluate(`
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const clickMenuItem = re => evaluate(`
     (function() {
-      var m = ${FIND_MONACO};
-      if (!m) return false;
-      m.editor.setValue(${escaped});
-      return true;
+      var items = document.querySelectorAll('[role="menuitem"]');
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].offsetParent && ${re}.test(items[i].textContent.trim())) {
+          // "Create new" is a submenu that sometimes only opens on hover
+          items[i].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+          items[i].click();
+          return true;
+        }
+      }
+      return false;
     })()
   `);
 
-  if (!set) throw new Error('Monaco editor not found. Ensure Pine Editor is open.');
+  const opened = await evaluate(`
+    (function() {
+      var b = Array.prototype.find.call(document.querySelectorAll('[class*="nameButton"]'), function(x) { return x.offsetParent; });
+      if (!b) return false;
+      b.click();
+      return true;
+    })()
+  `);
+  if (!opened) throw new Error('Pine Editor script-name menu not found; refusing to create a script by overwriting the open one.');
+  await sleep(400);
+  if (!await clickMenuItem(/^Create new$/)) {
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    throw new Error('"Create new" menu item not found; nothing was changed.');
+  }
+  await sleep(400);
+  if (!await clickMenuItem(menuLabel)) {
+    await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    throw new Error(`"Create new → ${type}" menu item not found; nothing was changed.`);
+  }
 
-  return { success: true, type, action: 'new_script_created', template: typeMap[type] };
+  // Verify the editor is now on a fresh, unsaved script of the right type.
+  let state = null;
+  for (let i = 0; i < 20; i++) {
+    await sleep(250);
+    state = await evaluate(`
+      (function() {
+        var m = ${FIND_MONACO};
+        return { title: ${readTitle}, src: m ? m.editor.getValue() : null };
+      })()
+    `);
+    if (state?.title === 'Untitled script' && new RegExp(declRe).test(state.src || '')) break;
+  }
+  if (state?.title !== 'Untitled script') {
+    throw new Error(`New script not confirmed (editor title is "${state?.title}", was "${before}"). Do not call pine_set_source until the editor shows an untitled script.`);
+  }
+
+  return { success: true, type, action: 'new_script_created', title: state.title, previous_title: before };
 }
 
 export async function openScript({ name }) {
